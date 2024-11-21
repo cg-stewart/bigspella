@@ -1,15 +1,21 @@
 {
-  "name": "monorepo-template",
+  "name": "bigspella",
   "version": "0.0.0",
   "workspaces": [
     "packages/*"
   ],
-  "scripts": {},
+  "scripts": {
+    "db": "sst shell drizzle-kit"
+  },
   "devDependencies": {
     "@tsconfig/node20": "^20.1.4",
     "typescript": "5.6.2"
   },
   "dependencies": {
+    "@types/pg": "^8.11.10",
+    "drizzle-kit": "^0.28.1",
+    "drizzle-orm": "^0.36.3",
+    "pg": "^8.13.1",
     "sst": "^3"
   }
 }

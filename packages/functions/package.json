@@ -1,8 +1,9 @@
 {
-  "name": "@monorepo-template/functions",
+  "name": "@bigspella/functions",
   "version": "0.0.0",
   "dependencies": {
-    "@monorepo-template/core": "*",
+    "@bigspella/core": "*",
+    "aws-lambda": "^1.0.7",
     "sst": "*"
   },
   "devDependencies": {

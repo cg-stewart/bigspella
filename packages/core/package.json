@@ -1,5 +1,5 @@
 {
-  "name": "@monorepo-template/core",
+  "name": "@bigspella/core",
   "version": "0.0.0",
   "scripts": {
     "test": "sst shell vitest"
@@ -11,7 +11,10 @@
     ]
   },
   "dependencies": {
-    "sst": "*"
+    "@aws-sdk/client-chime-sdk-meetings": "^3.696.0",
+    "openai": "^4.73.0",
+    "sst": "*",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "vitest": "^2.0.3"
