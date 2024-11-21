@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { Resource } from "sst";
 
 export module GameRoom {
   // Schema for player data

@@ -2,32 +2,45 @@ import { ChimeSDKMeetings } from "@aws-sdk/client-chime-sdk-meetings";
 import { db } from "../db/drizzle";
 import { games } from "../db/schema/game.sql";
 import { eq } from "drizzle-orm";
+import {
+  calculateRoundScore,
+  calculateEloRating,
+  checkAchievements,
+} from "./scoring";
+import { GameSettings, Player, Achievement, RoundStat } from "./types";
 
 export module GameService {
   const chime = new ChimeSDKMeetings({ region: "us-east-1" });
 
-  export type GameSettings = {
-    maxPlayers: number;
-    roundDuration: number;
-    difficultyLevel: "EASY" | "MEDIUM" | "HARD" | "EXPERT";
-    totalRounds: number;
-  };
-
-  export type Player = {
-    id: string;
-    username: string;
-    score: number;
-    attendeeId: string;
-    isHost: boolean;
-    isReady: boolean;
-  };
-
-  const DEFAULT_SETTINGS: GameSettings = {
+  export const DEFAULT_SETTINGS: GameSettings = {
     maxPlayers: 4,
     roundDuration: 60,
     difficultyLevel: "MEDIUM",
     totalRounds: 10,
+    scoringConfig: {
+      basePoints: 100,
+      timeBonus: 50,
+      streakBonus: 20,
+      difficultyMultiplier: 1,
+    },
   };
+
+  const createDefaultPlayer = (
+    id: string,
+    username: string,
+    attendeeId: string,
+    isHost: boolean
+  ): Player => ({
+    id,
+    username,
+    attendeeId,
+    isHost,
+    score: 0,
+    eloRating: 1200, // Default ELO rating
+    isReady: false,
+    achievements: [],
+    roundStats: [],
+  });
 
   /**
    * Create a new game room with a Chime SDK meeting
@@ -37,14 +50,12 @@ export module GameService {
     hostPlayer: { id: string; username: string },
     settings: Partial<GameSettings> = {}
   ) {
-    // Create a Chime SDK meeting
     const meeting = await chime.createMeeting({
       ClientRequestToken: `game-${Date.now()}`,
       MediaRegion: "us-east-1",
       ExternalMeetingId: `game-${Date.now()}`,
     });
 
-    // Create attendee for host
     const attendee = await chime.createAttendee({
       MeetingId: meeting.Meeting!.MeetingId!,
       ExternalUserId: hostPlayer.id,
@@ -52,7 +63,13 @@ export module GameService {
 
     const gameSettings = { ...DEFAULT_SETTINGS, ...settings };
 
-    // Create game record in database
+    const initialPlayer = createDefaultPlayer(
+      hostPlayer.id,
+      hostPlayer.username,
+      attendee.Attendee!.AttendeeId!,
+      true
+    );
+
     const game = await db
       .insert(games)
       .values({
@@ -61,16 +78,7 @@ export module GameService {
         meetingId: meeting.Meeting!.MeetingId!,
         state: "LOBBY",
         hostId: hostPlayer.id,
-        players: [
-          {
-            id: hostPlayer.id,
-            username: hostPlayer.username,
-            score: 0,
-            attendeeId: attendee.Attendee!.AttendeeId!,
-            isHost: true,
-            isReady: false,
-          },
-        ],
+        players: [initialPlayer],
         settings: gameSettings,
         currentRound: 0,
       })
@@ -112,14 +120,12 @@ export module GameService {
       ExternalUserId: player.id,
     });
 
-    const newPlayer: Player = {
-      id: player.id,
-      username: player.username,
-      score: 0,
-      attendeeId: attendee.Attendee!.AttendeeId!,
-      isHost: false,
-      isReady: false,
-    };
+    const newPlayer = createDefaultPlayer(
+      player.id,
+      player.username,
+      attendee.Attendee!.AttendeeId!,
+      false
+    );
 
     // Update game record
     const updatedGame = await db
@@ -235,8 +241,140 @@ export module GameService {
     return await db
       .update(games)
       .set({
-        state: "IN_PROGRESS",
+        state: "ROUND_STARTING",
         currentRound: 1,
+        updatedAt: new Date(),
+      })
+      .where(eq(games.id, gameId))
+      .returning();
+  }
+
+  /**
+   * Start a new round
+   */
+  export async function startRound(gameId: string) {
+    const game = await db.query.games.findFirst({
+      where: eq(games.id, gameId),
+    });
+
+    if (!game) {
+      throw new Error("Game not found");
+    }
+
+    if (game.state !== "ROUND_STARTING") {
+      throw new Error("Game is not ready to start round");
+    }
+
+    // TODO: Get a new word from the word service
+    const newWord = "EXAMPLE";
+
+    return await db
+      .update(games)
+      .set({
+        state: "ROUND_IN_PROGRESS",
+        currentWord: newWord,
+        roundStartTime: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(games.id, gameId))
+      .returning();
+  }
+
+  /**
+   * Submit an answer for the current round
+   */
+  export async function submitAnswer(
+    gameId: string,
+    playerId: string,
+    answer: string
+  ) {
+    const game = await db.query.games.findFirst({
+      where: eq(games.id, gameId),
+    });
+
+    if (!game) {
+      throw new Error("Game not found");
+    }
+
+    if (game.state !== "ROUND_IN_PROGRESS") {
+      throw new Error("Round is not in progress");
+    }
+
+    const playerIndex = game.players.findIndex((p) => p.id === playerId);
+    if (playerIndex === -1) {
+      throw new Error("Player not found in game");
+    }
+
+    const isCorrect = answer.toLowerCase() === game.currentWord?.toLowerCase();
+    const timeToAnswer = game.roundStartTime
+      ? Math.floor((Date.now() - game.roundStartTime.getTime()) / 1000)
+      : game.settings.roundDuration;
+
+    const player = game.players[playerIndex];
+
+    // Calculate streak
+    const streak = (player.roundStats || []).reduce((count, stat) => {
+      if (!stat.isCorrect) return 0;
+      return count + 1;
+    }, 0);
+
+    // Calculate score for this round
+    const roundScore = isCorrect
+      ? calculateRoundScore(
+          timeToAnswer,
+          streak,
+          game.settings.scoringConfig,
+          game.settings.difficultyLevel,
+          game.settings.roundDuration
+        )
+      : { score: 0, bonuses: { timeBonus: 0, streakBonus: 0, difficultyBonus: 0 } };
+
+    // Update player stats
+    const updatedPlayers = [...game.players];
+    const updatedPlayer = updatedPlayers[playerIndex];
+
+    updatedPlayer.roundStats = [
+      ...(updatedPlayer.roundStats || []),
+      {
+        roundNumber: game.currentRound,
+        score: roundScore.score,
+        word: game.currentWord || undefined,
+        timeToAnswer,
+        isCorrect,
+      },
+    ];
+
+    updatedPlayer.score += roundScore.score;
+
+    // Check for achievements
+    const newAchievements = checkAchievements(
+      updatedPlayer,
+      updatedPlayer.roundStats || []
+    );
+    updatedPlayer.achievements = [
+      ...(updatedPlayer.achievements || []),
+      ...newAchievements,
+    ];
+
+    // Update ELO rating if this is the last round
+    if (game.currentRound === game.settings.totalRounds) {
+      const otherPlayers = game.players.filter((p) => p.id !== playerId);
+      updatedPlayer.eloRating = otherPlayers.reduce((rating, opponent) => {
+        return calculateEloRating(
+          rating,
+          opponent.eloRating || 1200,
+          updatedPlayer.score,
+          opponent.score
+        );
+      }, updatedPlayer.eloRating || 1200);
+    }
+
+    return await db
+      .update(games)
+      .set({
+        players: updatedPlayers,
+        state: "ROUND_ENDED",
+        roundEndTime: new Date(),
         updatedAt: new Date(),
       })
       .where(eq(games.id, gameId))
